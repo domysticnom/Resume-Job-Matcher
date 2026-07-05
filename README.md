@@ -1,4 +1,4 @@
-# IE 7500 — Résumé & Job Matching (Group 6)
+# Résumé & Job Matching
 
 An explainable NLP system that scores how well a résumé fits a job posting and
 returns top-N recommendations.
