@@ -52,3 +52,17 @@ def test_extract_skills_ner_surfaces_unlisted_skills(monkeypatch):
     )
     joined = " ".join(skills)
     assert "kubernetes" in joined or "react" in joined
+    # No leaked WordPiece subword fragments (regression: "Ku" + "##net").
+    assert not any("##" in s for s in skills), skills
+
+
+@pytest.mark.skipif(
+    os.environ.get("MATCHER_RUN_NER_TESTS") != "1",
+    reason="NER integration test downloads a model; set MATCHER_RUN_NER_TESTS=1 to run",
+)
+def test_ner_unions_gazetteer_for_common_skills(monkeypatch):
+    # Regression: NER recall is inconsistent across contexts, but common skills
+    # in the keyword gazetteer (e.g. "python") must still be caught via the union.
+    monkeypatch.delenv("MATCHER_DISABLE_NER", raising=False)
+    skills = extract_skills("Senior data engineer: Python, Airflow, and Spark.")
+    assert "python" in skills, skills

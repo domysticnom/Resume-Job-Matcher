@@ -8,11 +8,13 @@ in free text, so extraction is no longer limited to a hand-written list:
 The two are complementary — the knowledge model tags concrete technologies the
 skill model labels as "outside" — so both are run and their spans unioned.
 
-Fallback path: if the models cannot be loaded (offline, no download, missing
-deps, or NER explicitly disabled) the original fixed keyword dictionary is used,
-so the app never breaks. The fallback is also used whenever a caller passes an
-explicit ``skill_list`` (the offline baseline scripts do this to match against a
-fixed job-skill vocabulary).
+Gazetteer path: the fixed keyword dictionary is unioned with the NER output so
+common skills are caught even when NER's recall is inconsistent across contexts
+("NER + gazetteer"). If the models cannot be loaded (offline, no download,
+missing deps, or NER explicitly disabled) the keyword dictionary is used alone,
+so the app never breaks. The keyword matcher is also the sole path whenever a
+caller passes an explicit ``skill_list`` (the offline baseline scripts do this
+to match against a fixed job-skill vocabulary).
 
 Environment knobs:
   MATCHER_KNOWLEDGE_NER_MODEL  HF model id for hard-skill spans
@@ -192,7 +194,11 @@ def _get_ner_pipelines():
                 pipeline(
                     "token-classification",
                     model=model_id,
-                    aggregation_strategy="simple",
+                    # "first" keeps whole words intact (labels the word by its
+                    # first subtoken). "simple" fragments some words into
+                    # subword pieces like "Ku" + "##net", which never match and
+                    # pollute the skill list.
+                    aggregation_strategy="first",
                 )
             )
         except Exception:
@@ -245,6 +251,9 @@ def _ner_extract(text):
                 norm = _normalize_skill(piece)
                 if not norm:
                     continue
+                # Drop leaked WordPiece subword fragments (e.g. "##net").
+                if "##" in norm:
+                    continue
                 # Keep multi-character spans, plus known short skills ("r", "c").
                 if len(norm) >= 2 or norm in _KEYWORD_SET:
                     skills.append(norm)
@@ -282,8 +291,12 @@ def extract_skills(text, skill_list=None):
     if skill_list is not None:
         return _keyword_extract(text, skill_list)
 
-    # Default path: NER primary, keyword fallback.
+    # Default path: NER unioned with the keyword gazetteer. NER supplies the long
+    # tail (Kubernetes, Airflow, ...); the keyword list guarantees common skills
+    # (Python, SQL, AWS, ...) are caught even when NER's recall is inconsistent
+    # across contexts. If NER is unavailable, fall back to keywords alone.
+    kw = _keyword_extract(text, None)
     ner = _ner_extract(text)
-    if ner is not None:
-        return ner
-    return _keyword_extract(text, None)
+    if ner is None:
+        return kw
+    return sorted(set(ner) | set(kw))
