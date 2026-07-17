@@ -37,6 +37,7 @@ class Posting:
     id: str
     text: str
     title: str
+    skills: list = field(default_factory=list)   # precomputed once; see scripts/precompute_skills.py
 
 
 @dataclass
@@ -54,7 +55,13 @@ def load_job_corpus(refresh: bool = False) -> list[Posting]:
     """Load unique job postings, caching to data/processed for offline reuse."""
     if CORPUS_CSV.exists() and not refresh:
         with open(CORPUS_CSV, encoding="utf-8") as f:
-            return [Posting(**row) for row in csv.DictReader(f)]
+            postings = []
+            for row in csv.DictReader(f):
+                skills = [s for s in (row.get("skills") or "").split(";") if s]
+                postings.append(
+                    Posting(id=row["id"], text=row["text"], title=row["title"], skills=skills)
+                )
+            return postings
 
     from datasets import load_dataset
 
@@ -68,10 +75,12 @@ def load_job_corpus(refresh: bool = False) -> list[Posting]:
 
     CORPUS_CSV.parent.mkdir(parents=True, exist_ok=True)
     with open(CORPUS_CSV, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["id", "text", "title"])
+        writer = csv.DictWriter(f, fieldnames=["id", "text", "title", "skills"])
         writer.writeheader()
         for p in postings:
-            writer.writerow({"id": p.id, "text": p.text, "title": p.title})
+            writer.writerow(
+                {"id": p.id, "text": p.text, "title": p.title, "skills": ";".join(p.skills)}
+            )
     return postings
 
 
@@ -126,9 +135,13 @@ class JobRecommender:
 
         candidates.sort(key=lambda c: c[2], reverse=True)
 
+        # Extract the résumé's skills once (not per posting); use each posting's
+        # precomputed skills, falling back to live extraction only if absent.
+        resume_skills = extract_skills(resume)
         recs = []
         for rank, (posting, retrieve, score, label) in enumerate(candidates[:top_n], 1):
-            overlap = keyword_overlap_score(extract_skills(resume), extract_skills(posting.text))
+            posting_skills = posting.skills or extract_skills(posting.text)
+            overlap = keyword_overlap_score(resume_skills, posting_skills)
             recs.append(
                 Recommendation(
                     rank=rank,

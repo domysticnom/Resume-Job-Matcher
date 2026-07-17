@@ -15,6 +15,9 @@ kaggle.json
 data/**
 !data/**/
 !data/**/.gitkeep
+# The job corpus WITH precomputed skills ships with the repo so the app (and the
+# HF Space) never has to run NER over the whole corpus at query time.
+!data/processed/job_postings.csv
 models/**
 !models/**/
 !models/**/.gitkeep

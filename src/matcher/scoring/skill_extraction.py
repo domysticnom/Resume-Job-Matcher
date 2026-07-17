@@ -1,18 +1,24 @@
 """
 Skill extraction for the Resume-to-Job Skill Matcher.
 
-Primary path: two pretrained NER models from the jjzha / SkillSpan line tag spans
-in free text, so extraction is no longer limited to a hand-written list:
-  * jjzha/jobbert_knowledge_extraction -> hard skills / tools (Python, Kubernetes)
-  * jjzha/jobbert_skill_extraction     -> applied / soft skills (communication)
-The two are complementary — the knowledge model tags concrete technologies the
-skill model labels as "outside" — so both are run and their spans unioned.
+Output is restricted to a curated skill gazetteer (``skill_vocab.txt``) so the
+matched/missing lists stay clean — raw NER over real job descriptions is noisy
+("understanding of the problem", "bachelor's", "degree"). Two complementary paths
+are unioned, both filtered to the gazetteer:
+  * keyword matching  — whole-token match of gazetteer skills in the text
+  * NER validation    — two jjzha / SkillSpan models tag spans, and a span is
+                        kept only if it is a recognised gazetteer skill
+    (jjzha/jobbert_knowledge_extraction for tools, jjzha/jobbert_skill_extraction
+    for applied skills).
 
-Fallback path: if the models cannot be loaded (offline, no download, missing
-deps, or NER explicitly disabled) the original fixed keyword dictionary is used,
-so the app never breaks. The fallback is also used whenever a caller passes an
-explicit ``skill_list`` (the offline baseline scripts do this to match against a
-fixed job-skill vocabulary).
+If the NER models cannot be loaded (offline, no download, missing deps, or NER
+explicitly disabled) keyword matching is used alone, so the app never breaks. The
+keyword matcher is also the sole path whenever a caller passes an explicit
+``skill_list`` (the offline baseline scripts match against a fixed vocabulary).
+
+NER's added value is currently modest — with exact gazetteer validation it mostly
+overlaps keyword matching. Fuzzy/embedding matching to the gazetteer (the scoped
+canonicalization follow-up) is what lets NER contribute variant spellings.
 
 Environment knobs:
   MATCHER_KNOWLEDGE_NER_MODEL  HF model id for hard-skill spans
@@ -26,6 +32,7 @@ Environment knobs:
 import os
 import re
 from functools import lru_cache
+from pathlib import Path
 
 # Knowledge first (hard skills/tools), then skill (applied/soft skills).
 NER_MODELS = (
@@ -60,7 +67,7 @@ def _ner_disabled():
     }
 
 
-SKILL_KEYWORDS = [
+_BUILTIN_KEYWORDS = [
     # Programming and data
     "python",
     "sql",
@@ -138,6 +145,25 @@ SKILL_KEYWORDS = [
     "human resources",
 ]
 
+
+def _load_vocab():
+    """Load the curated skill gazetteer from skill_vocab.txt (one skill per line).
+
+    Extraction reports only skills in this vocabulary, which keeps output clean
+    (no "degree"/"experience"/"bachelor's" noise). Falls back to the built-in
+    list if the file is missing or empty.
+    """
+    path = Path(__file__).with_name("skill_vocab.txt")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return list(_BUILTIN_KEYWORDS)
+    vocab = [s.strip().lower() for s in lines]
+    vocab = [s for s in vocab if s and not s.startswith("#")]
+    return vocab or list(_BUILTIN_KEYWORDS)
+
+
+SKILL_KEYWORDS = _load_vocab()
 _KEYWORD_SET = {s.lower() for s in SKILL_KEYWORDS}
 
 
@@ -192,7 +218,11 @@ def _get_ner_pipelines():
                 pipeline(
                     "token-classification",
                     model=model_id,
-                    aggregation_strategy="simple",
+                    # "first" keeps whole words intact (labels the word by its
+                    # first subtoken). "simple" fragments some words into
+                    # subword pieces like "Ku" + "##net", which never match and
+                    # pollute the skill list.
+                    aggregation_strategy="first",
                 )
             )
         except Exception:
@@ -245,8 +275,10 @@ def _ner_extract(text):
                 norm = _normalize_skill(piece)
                 if not norm:
                     continue
-                # Keep multi-character spans, plus known short skills ("r", "c").
-                if len(norm) >= 2 or norm in _KEYWORD_SET:
+                # Validate against the curated gazetteer: keep only recognised
+                # skills, so NER's noisy spans ("understanding of the problem",
+                # "bachelor ' s", "degree", "experience") are dropped.
+                if norm in _KEYWORD_SET:
                     skills.append(norm)
     if not any_ok:
         return []
@@ -282,8 +314,12 @@ def extract_skills(text, skill_list=None):
     if skill_list is not None:
         return _keyword_extract(text, skill_list)
 
-    # Default path: NER primary, keyword fallback.
+    # Default path: NER unioned with the keyword gazetteer. NER supplies the long
+    # tail (Kubernetes, Airflow, ...); the keyword list guarantees common skills
+    # (Python, SQL, AWS, ...) are caught even when NER's recall is inconsistent
+    # across contexts. If NER is unavailable, fall back to keywords alone.
+    kw = _keyword_extract(text, None)
     ner = _ner_extract(text)
-    if ner is not None:
-        return ner
-    return _keyword_extract(text, None)
+    if ner is None:
+        return kw
+    return sorted(set(ner) | set(kw))

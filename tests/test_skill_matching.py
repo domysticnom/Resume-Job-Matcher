@@ -28,6 +28,19 @@ def test_extract_skills_explicit_list():
     assert skills == ["kafka", "kubernetes", "python"]
 
 
+def test_extraction_is_vocab_restricted(monkeypatch):
+    # Output must stay within the curated gazetteer — no "degree"/"business"/
+    # "experience" noise. Deterministic (NER disabled -> keyword matching).
+    monkeypatch.setenv("MATCHER_DISABLE_NER", "1")
+    from matcher.scoring.skill_extraction import _KEYWORD_SET
+
+    jd = "Bachelor's degree required; strong business experience. Must know SQL and Python."
+    skills = extract_skills(jd)
+    assert all(s in _KEYWORD_SET for s in skills), skills
+    assert "degree" not in skills and "experience" not in skills and "business" not in skills
+    assert "sql" in skills and "python" in skills
+
+
 def test_keyword_overlap_score():
     resume_skills = ["python", "sql", "excel"]
     job_skills = ["python", "sql", "tableau"]
@@ -52,3 +65,17 @@ def test_extract_skills_ner_surfaces_unlisted_skills(monkeypatch):
     )
     joined = " ".join(skills)
     assert "kubernetes" in joined or "react" in joined
+    # No leaked WordPiece subword fragments (regression: "Ku" + "##net").
+    assert not any("##" in s for s in skills), skills
+
+
+@pytest.mark.skipif(
+    os.environ.get("MATCHER_RUN_NER_TESTS") != "1",
+    reason="NER integration test downloads a model; set MATCHER_RUN_NER_TESTS=1 to run",
+)
+def test_ner_unions_gazetteer_for_common_skills(monkeypatch):
+    # Regression: NER recall is inconsistent across contexts, but common skills
+    # in the keyword gazetteer (e.g. "python") must still be caught via the union.
+    monkeypatch.delenv("MATCHER_DISABLE_NER", raising=False)
+    skills = extract_skills("Senior data engineer: Python, Airflow, and Spark.")
+    assert "python" in skills, skills
